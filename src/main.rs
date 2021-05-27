@@ -1,7 +1,13 @@
+mod logger;
 mod system;
+mod tui;
+
 use crate::system::System;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-	System::new().run().await
+	if let Some(mut system) = System::new()? {
+		system.run().await?;
+	}
+	Ok(())
 }
