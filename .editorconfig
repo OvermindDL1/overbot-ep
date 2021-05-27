@@ -1,0 +1,7 @@
+[*]
+# Not a valid text file unless the final character is a newline
+insert_final_newline = true
+# Superior to Spaces due to greater accessibility and each user can use whatever spacing they want for an indent
+indent_style = tab
+# Rust source files are utf-8
+charset = utf-8
