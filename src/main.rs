@@ -1,5 +1,7 @@
+mod system;
+use crate::system::System;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-	println!("Hello, world!");
-	Ok(())
+	System::new().run().await
 }
