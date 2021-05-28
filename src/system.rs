@@ -90,7 +90,7 @@ impl System {
 			})
 		} else {
 			println!(
-				"No configuration found, wrote out new configuration file at: {:?}",
+				"No configuration found, wrote out new configuration file at: {:?}, please make edits as necessary and launch again",
 				config_path
 			);
 			Ok(None)

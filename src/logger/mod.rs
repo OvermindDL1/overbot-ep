@@ -1,3 +1,4 @@
+pub mod cache_appender;
 pub mod conditional_append_appender;
 pub mod conditional_map;
 pub mod launch_roll_file_appender;
@@ -10,11 +11,11 @@ use tracing::log::SetLoggerError;
 const DEFAULT_LOGGING_DEFINITION_RON: &'static str = r#"(
 	// Default values for loggers
 	root: Root(
-		// Default log filter level unless otherwise specified in the loggers section
+		// Default log filter level unless otherwise specified in the loggers section.
 		level: Trace,
 		// The appenders to enable by default from the appenders section, can be overridden or
-		// added to this in the loggers section
-		appenders: ["console", "log_file"],
+		// added to this in the loggers section.
+		appenders: ["console", "log_file", "tui_log_view"],
 	),
 
 	// List of appenders, these receive a log event and do whatever they wish to do with it.
@@ -167,6 +168,20 @@ const DEFAULT_LOGGING_DEFINITION_RON: &'static str = r#"(
 				},
 			},
 		},
+		"tui_log_view": {
+			// This is a named cache logger, used for the TUI log view, so don't remove this if you
+			// might ever use the TUI log view.
+			"kind": "cache_logger",
+			// Internal lookup name of this cache, the TUI log_view uses "tui_log_view".
+			"name": "tui_log_view",
+			// How many entries to cache
+			"count": 256,
+			// Standard encoder as described above
+			"encoder": {
+				"kind": "pattern",
+				"pattern": "{d(%H:%M:%S%.3f)} {h({l})} {M}: {m}",
+			},
+		},
 	},
 
 	loggers: {
@@ -187,6 +202,7 @@ const DEFAULT_LOGGING_DEFINITION_RON: &'static str = r#"(
 			additive: true,
 		),
 		"mio::poll": ( level: Info ),
+		"cursive_core": ( level: Info ),
 	},
 )
 "#;
@@ -226,33 +242,29 @@ pub fn init_logging(config_dir: Option<&Path>) -> Result<(), Error> {
 				}
 				path
 			};
-			let mut deserializers = Deserializers::new();
-			deserializers.insert(
-				"launch_roll_file",
-				launch_roll_file_appender::RollFileOnLaunchAppenderDeserializer,
-			);
-			deserializers.insert(
-				"conditional_appender",
-				conditional_append_appender::ConditionallyAppendAppenderDeserializer,
-			);
-			let config = config_from_ron_file(&logger_config_path, &deserializers)?;
+			let config = config_from_ron_file(&logger_config_path, &deserializers())?;
 			log4rs::init_config(config)?;
 		}
 		None => {
-			let mut deserializers = Deserializers::new();
-			deserializers.insert(
-				"launch_roll_file",
-				launch_roll_file_appender::RollFileOnLaunchAppenderDeserializer,
-			);
-			deserializers.insert(
-				"conditional_appender",
-				conditional_append_appender::ConditionallyAppendAppenderDeserializer,
-			);
-			let config = config_from_ron_string(DEFAULT_LOGGING_DEFINITION_RON, &deserializers)?;
+			let config = config_from_ron_string(DEFAULT_LOGGING_DEFINITION_RON, &deserializers())?;
 			log4rs::init_config(config)?;
 		}
 	};
 	Ok(())
+}
+
+fn deserializers() -> Deserializers {
+	let mut deserializers = Deserializers::new();
+	deserializers.insert(
+		"launch_roll_file",
+		launch_roll_file_appender::RollFileOnLaunchAppenderDeserializer,
+	);
+	deserializers.insert(
+		"conditional_appender",
+		conditional_append_appender::ConditionallyAppendAppenderDeserializer,
+	);
+	deserializers.insert("cache_logger", cache_appender::CacheAppenderDeserializer);
+	deserializers
 }
 
 fn config_from_ron_file(
