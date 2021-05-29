@@ -1,7 +1,9 @@
 use ron::extensions::Extensions;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use structopt::StructOpt;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -9,7 +11,7 @@ use tracing::*;
 
 #[typetag::serde(tag = "_type")]
 pub trait SystemTask {
-	fn spawn(&self, system: &System) -> anyhow::Result<Option<JoinHandle<()>>>;
+	fn spawn(&self, self_name: &str, system: &System) -> anyhow::Result<Option<JoinHandle<()>>>;
 }
 
 #[derive(Clone, Debug, StructOpt)]
@@ -31,12 +33,20 @@ pub struct SystemArgs {
 #[derive(Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SystemConfig {
-	system_tasks: Vec<Box<dyn SystemTask>>,
+	system_tasks: HashMap<String, Box<dyn SystemTask>>,
 }
 
 impl Default for SystemConfig {
 	fn default() -> Self {
-		let system_tasks: Vec<Box<dyn SystemTask>> = vec![Box::new(crate::tui::TUI::default())];
+		let mut system_tasks: HashMap<String, Box<dyn SystemTask>> = Default::default();
+		system_tasks.insert(
+			"TUI".to_owned(),
+			Box::new(crate::system_tasks::tui::TUI::default()),
+		);
+		system_tasks.insert(
+			"Daemon".to_owned(),
+			Box::new(crate::system_tasks::daemon::Daemon::new(true)),
+		);
 		Self { system_tasks }
 	}
 }
@@ -65,10 +75,12 @@ impl SystemConfig {
 
 pub struct System {
 	config: SystemConfig,
-	system_tasks: Vec<JoinHandle<()>>,
+	/// These tasks are ones that keep the system running, useful for daemon's, TUI's, network, etc.
+	pub system_tasks: Arc<crossbeam::queue::SegQueue<JoinHandle<()>>>,
 	pub tui: bool,
 	pub daemon: bool,
 	pub quit: broadcast::Sender<()>,
+	pub registered_modules: Arc<dashmap::DashMap<String, ()>>,
 }
 
 impl System {
@@ -103,10 +115,11 @@ impl System {
 		let (quit, _recv_quit) = broadcast::channel(1);
 		Ok(System {
 			config,
-			system_tasks: Vec::new(),
+			system_tasks: Default::default(),
 			daemon: false,
 			tui: false,
 			quit,
+			registered_modules: Default::default(),
 		})
 	}
 
@@ -122,8 +135,9 @@ impl System {
 
 	pub async fn startup_systems(&mut self) -> anyhow::Result<()> {
 		anyhow::ensure!(self.system_tasks.is_empty(), "systems already exist");
-		for system_task in &self.config.system_tasks {
-			if let Some(handle) = system_task.spawn(self)? {
+		for (system_task_name, system_task) in &self.config.system_tasks {
+			info!("Processing system task: {}", system_task_name);
+			if let Some(handle) = system_task.spawn(system_task_name, self)? {
 				self.system_tasks.push(handle);
 			}
 		}

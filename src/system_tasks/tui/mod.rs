@@ -9,6 +9,7 @@ use cursive::view::*;
 use cursive::views::*;
 use cursive::{Cursive, CursiveRunnable};
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 use tokio::sync::broadcast;
@@ -24,14 +25,11 @@ pub struct TUI {
 
 #[typetag::serde]
 impl SystemTask for TUI {
-	fn spawn(&self, system: &System) -> anyhow::Result<Option<JoinHandle<()>>> {
-		if system.daemon {
-			// Forced daemon mode
+	fn spawn(&self, _self_name: &str, system: &System) -> anyhow::Result<Option<JoinHandle<()>>> {
+		if !(!system.daemon && (self.enabled || system.tui)) {
 			return Ok(None);
 		}
-		if !self.enabled && !system.tui {
-			return Ok(None);
-		}
+		let registered_modules = system.registered_modules.clone();
 		let quit = system.quit.clone();
 		let on_quit = system.quit.subscribe();
 		let handle = spawn_blocking(move || {
@@ -40,7 +38,7 @@ impl SystemTask for TUI {
 			{
 				siv.add_global_callback('l', |_siv| info!("Logging a loggy log by 'l'"));
 			}
-			setup_ui(&mut siv, quit.clone());
+			setup_ui(&mut siv, registered_modules, quit.clone());
 			info!("TUI started, disabling the loggers conditional `console` output while it draws");
 			// Disable the logger while this runs
 			ConditionalMap::get_or_create_by_id("console".to_owned(), false)
@@ -69,7 +67,11 @@ fn toggle_named_hideable<V: View>(siv: &mut Cursive, name: &str) {
 	}
 }
 
-fn setup_ui(siv: &mut CursiveRunnable, quit: broadcast::Sender<()>) {
+fn setup_ui(
+	siv: &mut CursiveRunnable,
+	_registered_modules: Arc<dashmap::DashMap<String, ()>>,
+	quit: broadcast::Sender<()>,
+) {
 	// This is buggy as is doesn't appear "over" other things when focused... keep false
 	siv.set_autohide_menu(false);
 	siv.menubar()

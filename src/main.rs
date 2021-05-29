@@ -1,8 +1,8 @@
+use crate::system::System;
+
 mod logger;
 mod system;
-mod tui;
-
-use crate::system::System;
+mod system_tasks;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
