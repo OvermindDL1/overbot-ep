@@ -45,7 +45,7 @@ impl Default for SystemConfig {
 		);
 		system_tasks.insert(
 			"Daemon".to_owned(),
-			Box::new(crate::system_tasks::daemon::Daemon::new(true)),
+			Box::new(crate::system_tasks::daemon::Daemon::new(false)),
 		);
 		Self { system_tasks }
 	}
