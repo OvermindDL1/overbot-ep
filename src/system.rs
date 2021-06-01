@@ -1,9 +1,12 @@
+use crate::dash_type_map::DashTypeMap;
 use ron::extensions::Extensions;
 use ron::ser::PrettyConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 use structopt::StructOpt;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -36,16 +39,45 @@ pub struct SystemConfig {
 	system_tasks: HashMap<String, Box<dyn SystemTask>>,
 }
 
+const PASSWORD_CHARS: &[u8] =
+	"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_".as_bytes();
+fn gen_new_password(len: usize) -> String {
+	use rand::prelude::*;
+	PASSWORD_CHARS
+		.choose_multiple(&mut thread_rng(), len)
+		.cloned()
+		.map(Into::<char>::into)
+		.collect::<String>()
+}
+
 impl Default for SystemConfig {
 	fn default() -> Self {
 		let mut system_tasks: HashMap<String, Box<dyn SystemTask>> = Default::default();
 		system_tasks.insert(
 			"TUI".to_owned(),
-			Box::new(crate::system_tasks::tui::TUI::default()),
+			Box::new(crate::system_tasks::tui::TUI::new(false)),
 		);
 		system_tasks.insert(
 			"Daemon".to_owned(),
-			Box::new(crate::system_tasks::daemon::Daemon::new(false)),
+			Box::new(crate::system_tasks::daemon::Daemon::new(true)),
+		);
+		system_tasks.insert(
+			"Database".to_owned(),
+			Box::new(crate::system_tasks::postgres::Postgres::new_embedded(
+				true,
+				5,
+				"./data",
+				5433,
+				"postgres",
+				gen_new_password(32),
+				true,
+				Duration::from_secs(15),
+				None,
+			)),
+		);
+		system_tasks.insert(
+			"WebUiRocket".to_owned(),
+			Box::new(crate::system_tasks::web_ui_rocket::WebUiRocket::new(true)),
 		);
 		Self { system_tasks }
 	}
@@ -67,7 +99,11 @@ impl SystemConfig {
 					.with_indentor("\t".to_owned())
 					.with_extensions(Extensions::all()),
 			)?;
-			std::fs::write(path, ron)?;
+			let mut file = std::fs::File::create(path)?;
+			file.write_all(ron.as_bytes())?;
+			file.write_all("\n".as_bytes())?;
+			file.flush()?;
+			drop(file);
 			Ok(None)
 		}
 	}
@@ -76,11 +112,12 @@ impl SystemConfig {
 pub struct System {
 	config: SystemConfig,
 	/// These tasks are ones that keep the system running, useful for daemon's, TUI's, network, etc.
+	/// These tasks should *ALWAYS* quit when `quit` is broadcast on or the system may not ever die.
 	pub system_tasks: Arc<crossbeam::queue::SegQueue<JoinHandle<()>>>,
 	pub tui: bool,
 	pub daemon: bool,
 	pub quit: broadcast::Sender<()>,
-	pub registered_modules: Arc<dashmap::DashMap<String, ()>>,
+	pub registered_data: Arc<DashTypeMap>,
 }
 
 impl System {
@@ -119,7 +156,7 @@ impl System {
 			daemon: false,
 			tui: false,
 			quit,
-			registered_modules: Default::default(),
+			registered_data: Default::default(),
 		})
 	}
 

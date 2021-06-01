@@ -175,7 +175,7 @@ const DEFAULT_LOGGING_DEFINITION_RON: &'static str = r#"(
 			// Internal lookup name of this cache, the TUI log_view uses "tui_log_view".
 			"name": "tui_log_view",
 			// How many entries to cache
-			"count": 256,
+			"count": 1024,
 			// Standard encoder as described above
 			"encoder": {
 				"kind": "pattern",
@@ -203,6 +203,9 @@ const DEFAULT_LOGGING_DEFINITION_RON: &'static str = r#"(
 		),
 		"mio::poll": ( level: Info ),
 		"cursive_core": ( level: Info ),
+		"hyper": ( level: Info ),
+		"reqwest": ( level: Info ),
+		"want": ( level: Info ),
 	},
 )
 "#;

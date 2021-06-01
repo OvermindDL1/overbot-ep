@@ -1,5 +1,6 @@
 mod views;
 
+use crate::dash_type_map::DashTypeMap;
 use crate::logger::conditional_map::ConditionalMap;
 use crate::system::{System, SystemTask};
 use cursive::align::HAlign;
@@ -23,13 +24,19 @@ pub struct TUI {
 	enabled: bool,
 }
 
+impl TUI {
+	pub fn new(enabled: bool) -> Self {
+		Self { enabled }
+	}
+}
+
 #[typetag::serde]
 impl SystemTask for TUI {
 	fn spawn(&self, _self_name: &str, system: &System) -> anyhow::Result<Option<JoinHandle<()>>> {
 		if !(!system.daemon && (self.enabled || system.tui)) {
 			return Ok(None);
 		}
-		let registered_modules = system.registered_modules.clone();
+		let registered_data = system.registered_data.clone();
 		let quit = system.quit.clone();
 		let on_quit = system.quit.subscribe();
 		let handle = spawn_blocking(move || {
@@ -38,7 +45,7 @@ impl SystemTask for TUI {
 			{
 				siv.add_global_callback('l', |_siv| info!("Logging a loggy log by 'l'"));
 			}
-			setup_ui(&mut siv, registered_modules, quit.clone());
+			setup_ui(&mut siv, registered_data, quit.clone());
 			info!("TUI started, disabling the loggers conditional `console` output while it draws");
 			// Disable the logger while this runs
 			ConditionalMap::get_or_create_by_id("console".to_owned(), false)
@@ -69,7 +76,7 @@ fn toggle_named_hideable<V: View>(siv: &mut Cursive, name: &str) {
 
 fn setup_ui(
 	siv: &mut CursiveRunnable,
-	_registered_modules: Arc<dashmap::DashMap<String, ()>>,
+	_registered_data: Arc<DashTypeMap>,
 	quit: broadcast::Sender<()>,
 ) {
 	// This is buggy as is doesn't appear "over" other things when focused... keep false

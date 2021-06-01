@@ -10,16 +10,19 @@ anyhow = "1"
 crossbeam = "0.8"
 cursive = { version = "0.16.3", default-features = false, features = ["crossterm-backend"] }
 dashmap = "4"
+lazy_static = "1"
 log4rs = "1"
 parking_lot = "0.11"
-rocket = { version = "0.5.0-dev", git = "https://github.com/SergioBenitez/Rocket.git" }
+pg-embed = "0.3"
+rand = "0.8"
+rocket = { version = "0.5.0-dev", git = "https://github.com/SergioBenitez/Rocket.git" } # Change rocket to just `0.5` when it's released
 ron = "0.6"
 serde = { version = "1", features=["derive"] }
 serde-value = "0.7"
-lazy_static = "1"
-sqlx = { version = "0.5", features = ["runtime-tokio-rustls"] }
+sqlx = { version = "0.5", features = ["runtime-tokio-rustls", "postgres", "macros", "uuid", "tls"] }
 structopt = "0.3"
 thiserror = "1"
 tokio = { version = "1.6", features = ["full"] }
 tracing = { version = "0.1", features = ["attributes", "log", "log-always"] }
 typetag = "0.1"
+uuid = "0.8"

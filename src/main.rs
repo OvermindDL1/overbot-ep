@@ -1,8 +1,9 @@
 use crate::system::System;
 
-mod logger;
-mod system;
-mod system_tasks;
+pub mod dash_type_map;
+pub mod logger;
+pub mod system;
+pub mod system_tasks;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
