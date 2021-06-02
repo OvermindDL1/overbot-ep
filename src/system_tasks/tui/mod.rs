@@ -2,7 +2,8 @@ mod views;
 
 use crate::dash_type_map::DashTypeMap;
 use crate::logger::conditional_map::ConditionalMap;
-use crate::system::{System, SystemTask};
+use crate::system::{System, SystemPlugin};
+use anyhow::Context;
 use cursive::align::HAlign;
 use cursive::event::Key;
 use cursive::menu::MenuTree;
@@ -31,11 +32,8 @@ impl TUI {
 }
 
 #[typetag::serde]
-impl SystemTask for TUI {
-	fn spawn(&self, _self_name: &str, system: &System) -> anyhow::Result<Option<JoinHandle<()>>> {
-		if !(!system.daemon && (self.enabled || system.tui)) {
-			return Ok(None);
-		}
+impl SystemPlugin for TUI {
+	fn spawn(&self, system: &System) -> Option<JoinHandle<anyhow::Result<()>>> {
 		let registered_data = system.registered_data.clone();
 		let quit = system.quit.clone();
 		let on_quit = system.quit.subscribe();
@@ -52,11 +50,11 @@ impl SystemTask for TUI {
 				.store(false, Ordering::SeqCst);
 			tui_run_loop(&mut siv, quit, on_quit);
 			// And re-enable logger after
-			ConditionalMap::get_by_id("console")
-				.unwrap()
+			ConditionalMap::get_by_id("console").context("unable to lookup `console` in logger conditional map when it was created earlier")?
 				.store(true, Ordering::SeqCst);
+			Ok(())
 		});
-		Ok(Some(handle))
+		Some(handle)
 	}
 }
 

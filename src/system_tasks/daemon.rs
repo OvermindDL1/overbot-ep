@@ -1,25 +1,23 @@
-use crate::system::{System, SystemTask};
+use crate::system::{System, SystemPlugin};
+use anyhow::Context;
 use tokio::task::JoinHandle;
 use tracing::*;
 
-#[allow(clippy::upper_case_acronyms)]
 #[derive(Default, serde::Deserialize, serde::Serialize)]
 pub struct Daemon {
-	enabled: bool,
+	headless: bool,
 }
 
 impl Daemon {
-	pub fn new(enabled: bool) -> Self {
-		Self { enabled }
+	pub fn new(headless: bool) -> Self {
+		Self { headless }
 	}
 }
 
 #[typetag::serde]
-impl SystemTask for Daemon {
-	fn spawn(&self, _self_name: &str, system: &System) -> anyhow::Result<Option<JoinHandle<()>>> {
-		if !(!system.tui && (self.enabled || system.daemon)) {
-			return Ok(None);
-		}
+impl SystemPlugin for Daemon {
+	fn spawn(&self, system: &System) -> Option<JoinHandle<anyhow::Result<()>>> {
+		let headless = self.headless;
 		let do_quit = system.quit.clone();
 		let mut on_quit = system.quit.subscribe();
 		let handle = tokio::task::spawn(async move {
@@ -28,21 +26,27 @@ impl SystemTask for Daemon {
 			loop {
 				#[cfg(target_os = "linux")]
 				let mut hangup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-					.expect("failed registering hangup signal stream");
+					.context("failed registering hangup signal stream")?;
 				#[cfg(target_os = "linux")]
 				let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-					.expect("failed registering interrupt signal stream");
+					.context("failed registering interrupt signal stream")?;
 				#[cfg(target_os = "linux")]
 				let mut quit = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::quit())
-					.expect("failed registering quit signal stream");
+					.context("failed registering quit signal stream")?;
 				#[cfg(target_os = "linux")]
 				let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-					.expect("failed registering terminate signal stream");
+					.context("failed registering terminate signal stream")?;
 				#[cfg(target_os = "linux")]
 				let do_break = tokio::select! {
 					_ = hangup.recv() => {
-						info!("Hangup requested, daemon mode ignores it");
-						false
+						if headless {
+							info!("Hangup requested, daemon mode ignores it");
+							false
+						} else {
+							info!("Hangup requested, cleanly exiting");
+							let _ = do_quit.send(());
+							true
+						}
 					}
 					_ = interrupt.recv() => {
 						info!("Interrupt signal received, cleanly exiting...");
@@ -60,7 +64,7 @@ impl SystemTask for Daemon {
 						true
 					}
 					_ = on_quit.recv() => {
-						info!("Daemon task has received a quit requested, exiting");
+						info!("Signal handler has received a quit request, exiting...");
 						true
 					}
 				};
@@ -73,7 +77,7 @@ impl SystemTask for Daemon {
 						true
 					}
 					_ = on_quit.recv() => {
-						info!("Daemon task has received a quit requested, exiting");
+						info!("Signal handler has received a quit request, cleanly exiting...");
 						true
 					}
 				};
@@ -82,7 +86,9 @@ impl SystemTask for Daemon {
 					break;
 				}
 			}
+
+			Ok(())
 		});
-		Ok(Some(handle))
+		Some(handle)
 	}
 }

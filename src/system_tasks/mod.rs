@@ -1,4 +1,4 @@
 pub mod daemon;
-pub mod postgres;
+pub mod irc;
 pub mod tui;
 pub mod web_ui_rocket;

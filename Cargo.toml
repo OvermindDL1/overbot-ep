@@ -19,6 +19,7 @@ rocket = { version = "0.5.0-dev", git = "https://github.com/SergioBenitez/Rocket
 ron = "0.6"
 serde = { version = "1", features=["derive"] }
 serde-value = "0.7"
+sha2 = "0.9"
 sqlx = { version = "0.5", features = ["runtime-tokio-rustls", "postgres", "macros", "uuid", "tls"] }
 structopt = "0.3"
 thiserror = "1"

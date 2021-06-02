@@ -1,13 +1,12 @@
-use crate::system::{System, SystemTask};
-use anyhow::*;
+use anyhow::{bail, Context};
 use pg_embed::fetch::{Architecture, FetchSettings, OperationSystem, PG_V13};
 use pg_embed::postgres::{PgEmbed, PgSettings};
 use sqlx::postgres::PgPoolOptions;
-use sqlx::PgPool;
+use sqlx::{Executor, PgPool, Transaction};
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::task::JoinHandle;
 use tracing::*;
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -24,25 +23,25 @@ pub enum ConnectionType {
 	},
 }
 
-enum ConnectionWrapper {
+pub enum ConnectionLock {
 	External(String),
 	Embedded(Box<PgEmbed>),
 }
 
-impl ConnectionWrapper {
+impl ConnectionLock {
 	fn as_uri(&self) -> &str {
 		match self {
-			ConnectionWrapper::External(conn_string) => &conn_string,
-			ConnectionWrapper::Embedded(pg) => &pg.db_uri,
+			ConnectionLock::External(conn_string) => &conn_string,
+			ConnectionLock::Embedded(pg) => &pg.db_uri,
 		}
 	}
 }
 
-impl Drop for ConnectionWrapper {
+impl Drop for ConnectionLock {
 	fn drop(&mut self) {
 		match self {
-			ConnectionWrapper::External(_) => (),
-			ConnectionWrapper::Embedded(pg) => {
+			ConnectionLock::External(_) => (),
+			ConnectionLock::Embedded(pg) => {
 				info!("Shutting down embedded database...");
 				if let Err(e) = pg.stop_db() {
 					error!("error upon shutting down embedded postgres: {:?}", e);
@@ -83,10 +82,10 @@ fn get_fetch_settings(host: String) -> anyhow::Result<FetchSettings> {
 }
 
 impl ConnectionType {
-	async fn init_conn_string(&self) -> anyhow::Result<ConnectionWrapper> {
+	async fn init_conn_string(&self) -> anyhow::Result<ConnectionLock> {
 		match self {
 			ConnectionType::External(conn_string) => {
-				Ok(ConnectionWrapper::External(conn_string.clone()))
+				Ok(ConnectionLock::External(conn_string.clone()))
 			}
 			ConnectionType::Embedded {
 				root_path,
@@ -99,7 +98,7 @@ impl ConnectionType {
 			} => {
 				info!("initializing an embedded postgresql database");
 				let executables_dir: String = root_path
-					.join("postgres")
+					.join("embedded_postgres")
 					.to_str()
 					.with_context(|| {
 						format!(
@@ -164,23 +163,21 @@ impl ConnectionType {
 
 				info!("Embedded postgresql database successfully started");
 				info!("Database connection URI: {}", &pg.db_uri);
-				Ok(ConnectionWrapper::Embedded(Box::new(pg)))
+				Ok(ConnectionLock::Embedded(Box::new(pg)))
 			}
 		}
 	}
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
-pub struct Postgres {
-	enabled: bool,
+pub struct DatabaseConfig {
 	connection: ConnectionType,
 	max_connections: u8,
 }
 
-impl Postgres {
+impl DatabaseConfig {
 	#[allow(clippy::too_many_arguments)]
 	pub fn new_embedded(
-		enabled: bool,
 		max_connections: u8,
 		root_path: impl Into<PathBuf>,
 		port: i16,
@@ -202,87 +199,168 @@ impl Postgres {
 				.unwrap_or_else(|| "https://repo1.maven.org".to_owned()),
 		};
 		Self {
-			enabled,
 			connection,
 			max_connections,
 		}
 	}
 
-	pub fn new_external(enabled: bool, max_connections: u8, uri: impl Into<String>) -> Self {
+	pub fn new_external(max_connections: u8, uri: impl Into<String>) -> Self {
 		Self {
-			enabled,
 			connection: ConnectionType::External(uri.into()),
 			max_connections,
 		}
 	}
+
+	pub async fn create_database_pool(&self) -> anyhow::Result<(ConnectionLock, DbPool)> {
+		info!("Initializing postgresql database connection");
+		let connection = self.connection.init_conn_string().await?;
+
+		let pool = PgPoolOptions::new()
+			.max_connections(self.max_connections as u32)
+			.connect(connection.as_uri())
+			.await?;
+
+		let pool: DbPool = Arc::new(pool);
+		migrate_migration_table(&pool)
+			.await
+			.expect("failed migrating the migration table");
+
+		info!("Successfully initialized the database connection pool");
+		Ok((connection, pool))
+	}
 }
 
-#[typetag::serde]
-impl SystemTask for Postgres {
-	fn spawn(&self, _self_name: &str, system: &System) -> anyhow::Result<Option<JoinHandle<()>>> {
-		if !self.enabled {
-			return Ok(None);
+pub type DbPool = Arc<PgPool>;
+
+async fn migrate_migration_table(pool: &PgPool) -> anyhow::Result<()> {
+	pool.execute(
+		r#"
+		CREATE TABLE IF NOT EXISTS _migrations (
+			module text NOT NULL,
+			version bigint NOT NULL,
+			checksum bytea NOT NULL,
+			description text NOT NULL,
+			inserted_at timestamp without time zone NOT NULL DEFAULT now(),
+			CONSTRAINT _migrations_pkey PRIMARY KEY (module, version)
+		) WITH (
+			OIDS=FALSE
+		)
+	"#,
+	)
+	.await?;
+	info!("Migration Table loaded");
+	Ok(())
+}
+
+#[derive(Clone)]
+pub struct Migration {
+	pub version: i64,
+	pub description: Cow<'static, str>,
+	pub sql_up: Cow<'static, str>,
+	pub sql_down: Cow<'static, str>,
+	pub checksum: Cow<'static, [u8]>,
+}
+
+pub struct Migrations {
+	pub module: Cow<'static, str>,
+	pub migrations: Cow<'static, [Migration]>,
+}
+
+impl Migration {
+	pub fn new(version: i64, description: &'static str) -> Self {
+		let empty = Cow::Borrowed("");
+		Self {
+			version,
+			description: Cow::Borrowed(description),
+			sql_up: empty.clone(),
+			sql_down: empty,
+			checksum: Cow::Borrowed(&[]),
 		}
-		let registered_data = system.registered_data.clone();
-		let connection = self.connection.clone();
-		let max_connections = self.max_connections as u32;
-		let do_quit = system.quit.clone();
-		let mut on_quit = system.quit.subscribe();
-		let handle = tokio::task::spawn(async move {
-			info!("Initializing postgresql database connection");
-			let conn_string = match connection.init_conn_string().await {
-				Ok(conn_string) => conn_string,
-				Err(e) => {
-					error!(
-						"Unable to initialize database connection string due to: {:?}",
-						e
-					);
-					let _ = do_quit.send(());
-					return;
+	}
+
+	async fn migrate_up(
+		&self,
+		module: &str,
+		conn: &mut Transaction<'_, sqlx::Postgres>,
+	) -> anyhow::Result<()> {
+		info!("Migrate up {} - {}", module, self.version);
+		conn.execute(self.sql_up.as_ref()).await?;
+		Ok(())
+	}
+}
+
+impl Migrations {
+	pub const fn new(module: &'static str, migrations: &'static [Migration]) -> Self {
+		Self {
+			module: Cow::Borrowed(module),
+			migrations: Cow::Borrowed(migrations),
+		}
+	}
+
+	pub fn add_migration(self, migration: Migration) -> Self {
+		let mut migrations = self.migrations.into_owned();
+		migrations.push(migration);
+		Self {
+			migrations: Cow::Owned(migrations),
+			..self
+		}
+	}
+
+	pub fn is_valid(&self) -> bool {
+		if !self.migrations.is_empty() {
+			let mut version = self.migrations[0].version;
+			for mig in self.migrations.iter().skip(1) {
+				if mig.version <= version {
+					return false;
 				}
-			};
+				version = mig.version;
+			}
+		}
+		true
+	}
 
-			let uri = conn_string.as_uri();
-
-			match PgPoolOptions::new()
-				.max_connections(max_connections)
-				.connect(uri)
-				.await
-			{
-				Ok(pool) => {
-					let pool: Arc<PgPool> = Arc::new(pool);
-					match registered_data.insert(pool) {
-						Err(e) => {
-							error!("Cannot register multiple database instances into the registered_data: {}", e);
-						}
-						Ok(()) => {
-							info!("Successfully initialized the database connection pool");
-							// Fully registered, now wait until quit is requested
-							let _ = on_quit.recv().await;
-							info!("Shutdown request, attempting to stop the postgresql database connection pool");
-							let pg_pool = Arc::downgrade(&registered_data.remove::<Arc<PgPool>>().expect("Nothing should remove the database pool except the pool manager task"));
-							for _ in 0..50usize {
-								if pg_pool.upgrade().is_none() {
-									break;
-								}
-								tokio::time::sleep(Duration::from_millis(100)).await;
-							}
-							if pg_pool.upgrade().is_some() {
-								error!("Database pool is still open by something after 5 seconds");
-							} else {
-								info!("Database pool is now shut down");
-							}
-						}
+	pub async fn migrate_up(&self, pool: &PgPool) -> anyhow::Result<()> {
+		if !self.migrations.is_empty() {
+			info!("Migrating all up on {}", &self.module);
+			// Why is the `conn.transaction` call wrapper boxing a future?!?  Wasteful...
+			let mut conn = pool.begin().await?;
+			let mut current = sqlx::query_as::<_, (i64, Vec<u8>)>(
+				"SELECT version, checksum FROM _migrations WHERE module = ? ORDER BY version DESC",
+			)
+			.bind(self.module.as_ref())
+			.fetch_all(&mut conn)
+			.await?;
+			for mig in self.migrations.iter() {
+				if let Some((version, checksum)) = current.pop() {
+					if version != mig.version {
+						bail!(
+							"Version mismatch in {}: {} -> {}",
+							&self.module,
+							version,
+							mig.version
+						);
+					} else if checksum != mig.checksum.as_ref() {
+						bail!(
+							"Checksum mismatch in {} for version {}: {:?} -> {:?}",
+							&self.module,
+							version,
+							&checksum,
+							mig.checksum.as_ref()
+						);
 					}
-				}
-				Err(e) => {
-					error!("Error connecting to database: {:?}", e);
+				} else {
+					mig.migrate_up(&self.module, &mut conn).await?;
+					sqlx::query("INSERT INTO _migrations(module, version, checksum, description) VALUES (?,?,?,?)")
+						.bind(self.module.as_ref())
+						.bind(mig.version)
+						.bind(mig.checksum.as_ref())
+						.bind(mig.description.as_ref())
+						.execute(&mut conn)
+						.await?;
 				}
 			}
-
-			let _ = do_quit.send(());
-			drop(conn_string);
-		});
-		Ok(Some(handle))
+			conn.commit().await?;
+		}
+		Ok(())
 	}
 }

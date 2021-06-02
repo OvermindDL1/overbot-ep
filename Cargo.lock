@@ -1558,6 +1558,7 @@ dependencies = [
  "ron",
  "serde",
  "serde-value",
+ "sha2",
  "sqlx",
  "structopt",
  "thiserror",
