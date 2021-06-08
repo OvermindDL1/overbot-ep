@@ -1,5 +1,6 @@
 use crate::system::System;
 
+pub mod accounts;
 pub mod dash_type_map;
 pub mod database;
 pub mod logger;

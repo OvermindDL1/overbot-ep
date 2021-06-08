@@ -3,7 +3,7 @@ use pg_embed::fetch::{Architecture, FetchSettings, OperationSystem, PG_V13};
 use pg_embed::postgres::{PgEmbed, PgSettings};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool, Transaction};
-use std::borrow::Cow;
+use std::convert::TryInto;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -231,6 +231,7 @@ impl DatabaseConfig {
 }
 
 pub type DbPool = Arc<PgPool>;
+pub type DbTransaction<'a> = Transaction<'a, sqlx::Postgres>;
 
 async fn migrate_migration_table(pool: &PgPool) -> anyhow::Result<()> {
 	pool.execute(
@@ -244,7 +245,7 @@ async fn migrate_migration_table(pool: &PgPool) -> anyhow::Result<()> {
 			CONSTRAINT _migrations_pkey PRIMARY KEY (module, version)
 		) WITH (
 			OIDS=FALSE
-		)
+		);
 	"#,
 	)
 	.await?;
@@ -253,29 +254,58 @@ async fn migrate_migration_table(pool: &PgPool) -> anyhow::Result<()> {
 }
 
 #[derive(Clone)]
-pub struct Migration {
-	pub version: i64,
-	pub description: Cow<'static, str>,
-	pub sql_up: Cow<'static, str>,
-	pub sql_down: Cow<'static, str>,
-	pub checksum: Cow<'static, [u8]>,
+pub struct Migration<'d, 'su, 'sd> {
+	pub description: &'d str,
+	pub sql_up: &'su str,
+	pub sql_down: &'sd str,
 }
 
-pub struct Migrations {
-	pub module: Cow<'static, str>,
-	pub migrations: Cow<'static, [Migration]>,
+pub struct Migrations<'n, 'm, 'd, 'su, 'sd> {
+	pub module: &'n str,
+	pub migrations: &'m [Migration<'d, 'su, 'sd>],
 }
 
-impl Migration {
-	pub fn new(version: i64, description: &'static str) -> Self {
-		let empty = Cow::Borrowed("");
+impl<'d, 'su, 'sd> Migration<'d, 'su, 'sd> {
+	pub const fn new(description: &'d str) -> Self {
 		Self {
-			version,
-			description: Cow::Borrowed(description),
-			sql_up: empty.clone(),
-			sql_down: empty,
-			checksum: Cow::Borrowed(&[]),
+			description,
+			sql_up: "",
+			sql_down: "",
 		}
+	}
+
+	pub const fn up(self, sql_up: &'su str) -> Self {
+		// const-time panics are not yet in Rust:
+		// assert!(self.sql_up.is_empty(), "cannot replace existing up sql");
+		Self { sql_up, ..self }
+	}
+
+	pub const fn down(self, sql_down: &'sd str) -> Self {
+		// const-time panics are not yet in Rust:
+		// assert!(self.sql_down.is_empty(), "cannot replace existing down sql");
+		Self { sql_down, ..self }
+	}
+
+	pub const fn sql(self, sql_up: &'su str, sql_down: &'sd str) -> Self {
+		// const-time panics are not yet in Rust:
+		// assert!(self.sql_up.is_empty(), "cannot replace existing up sql");
+		// assert!(self.sql_down.is_empty(), "cannot replace existing down sql");
+		Self {
+			sql_up,
+			sql_down,
+			..self
+		}
+	}
+
+	pub fn checksum(&self) -> [u8; 64] {
+		use sha2::Digest;
+		sha2::Sha512::default()
+			.chain(self.sql_up.as_bytes())
+			.chain(self.sql_down.as_bytes())
+			.finalize()
+			.as_slice()
+			.try_into()
+			.expect("somehow SHA512 is suddenly no longer returning 512 bits?!?")
 	}
 
 	async fn migrate_up(
@@ -283,40 +313,15 @@ impl Migration {
 		module: &str,
 		conn: &mut Transaction<'_, sqlx::Postgres>,
 	) -> anyhow::Result<()> {
-		info!("Migrate up {} - {}", module, self.version);
+		info!("Migrate up {}", module);
 		conn.execute(self.sql_up.as_ref()).await?;
 		Ok(())
 	}
 }
 
-impl Migrations {
-	pub const fn new(module: &'static str, migrations: &'static [Migration]) -> Self {
-		Self {
-			module: Cow::Borrowed(module),
-			migrations: Cow::Borrowed(migrations),
-		}
-	}
-
-	pub fn add_migration(self, migration: Migration) -> Self {
-		let mut migrations = self.migrations.into_owned();
-		migrations.push(migration);
-		Self {
-			migrations: Cow::Owned(migrations),
-			..self
-		}
-	}
-
-	pub fn is_valid(&self) -> bool {
-		if !self.migrations.is_empty() {
-			let mut version = self.migrations[0].version;
-			for mig in self.migrations.iter().skip(1) {
-				if mig.version <= version {
-					return false;
-				}
-				version = mig.version;
-			}
-		}
-		true
+impl<'n, 'm, 'd, 'su, 'sd> Migrations<'n, 'm, 'd, 'su, 'sd> {
+	pub const fn new(module: &'n str, migrations: &'m [Migration<'d, 'su, 'sd>]) -> Self {
+		Self { module, migrations }
 	}
 
 	pub async fn migrate_up(&self, pool: &PgPool) -> anyhow::Result<()> {
@@ -324,37 +329,42 @@ impl Migrations {
 			info!("Migrating all up on {}", &self.module);
 			// Why is the `conn.transaction` call wrapper boxing a future?!?  Wasteful...
 			let mut conn = pool.begin().await?;
+			// Why doesn't sqlx support decoding to unsigned integers?!
+			// Why doesn't sqlx support decoding to a constant length array or reference thereof?!
 			let mut current = sqlx::query_as::<_, (i64, Vec<u8>)>(
-				"SELECT version, checksum FROM _migrations WHERE module = ? ORDER BY version DESC",
+				"SELECT version, checksum FROM _migrations WHERE module = $1 ORDER BY version DESC",
 			)
-			.bind(self.module.as_ref())
+			.bind(self.module)
 			.fetch_all(&mut conn)
 			.await?;
-			for mig in self.migrations.iter() {
+			for (mig_version, mig) in self.migrations.iter().enumerate() {
+				let mig_version = mig_version as i64;
 				if let Some((version, checksum)) = current.pop() {
-					if version != mig.version {
+					if checksum.len() != 64 {
+						bail!("Migration database checksum length is invalid for module {} with version {}", &self.module, version);
+					} else if version != mig_version {
 						bail!(
 							"Version mismatch in {}: {} -> {}",
 							&self.module,
 							version,
-							mig.version
+							mig_version
 						);
-					} else if checksum != mig.checksum.as_ref() {
+					} else if checksum != mig.checksum() {
 						bail!(
 							"Checksum mismatch in {} for version {}: {:?} -> {:?}",
 							&self.module,
 							version,
 							&checksum,
-							mig.checksum.as_ref()
+							mig.checksum()
 						);
 					}
 				} else {
 					mig.migrate_up(&self.module, &mut conn).await?;
-					sqlx::query("INSERT INTO _migrations(module, version, checksum, description) VALUES (?,?,?,?)")
-						.bind(self.module.as_ref())
-						.bind(mig.version)
-						.bind(mig.checksum.as_ref())
-						.bind(mig.description.as_ref())
+					sqlx::query("INSERT INTO _migrations(module, version, checksum, description) VALUES ($1, $2, $3, $4)")
+						.bind(self.module)
+						.bind(mig_version)
+						.bind(mig.checksum().as_ref()) // Why can't sqlx accept an array directly to bind?
+						.bind(mig.description)
 						.execute(&mut conn)
 						.await?;
 				}

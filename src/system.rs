@@ -157,6 +157,7 @@ pub struct SystemConfig {
 	run_mode: RunMode,
 	database: crate::database::DatabaseConfig,
 	web: Option<crate::web::WebConfig>,
+	accounts: crate::accounts::AccountsConfig,
 	// #[serde(with = "typetag_plugin_vec")]
 	// plugins: Vec<Box<dyn SystemPlugin>>,
 }
@@ -186,6 +187,7 @@ impl Default for SystemConfig {
 				Duration::from_secs(5),
 				None,
 			),
+			accounts: crate::accounts::AccountsConfig::new(),
 			web: Some(crate::web::WebConfig::default()),
 			// plugins: vec![
 			// 	Box::new(crate::system_tasks::daemon::Daemon::new(true)),
@@ -299,6 +301,8 @@ impl System {
 
 	pub async fn startup_systems(&mut self) -> anyhow::Result<()> {
 		anyhow::ensure!(self.system_tasks.is_empty(), "systems already exist");
+		self.system_tasks
+			.push(self.config.accounts.spawn(self).await?);
 		if let Some(web) = &self.config.web {
 			self.system_tasks.push(web.spawn(self));
 		}
