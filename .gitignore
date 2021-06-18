@@ -45,6 +45,14 @@
 # Rust generated documentation files
 !/docs/**/*
 
+# Web Assets
+!/assets/web/package.json
+!/assets/web/package-lock.json
+!/assets/web/webpack.config.js
+!/assets/web/postcss.config.js
+!/assets/web/dist/**/*
+!/assets/web/src/**/*
+
 # Project specific files, some examples:
 #!/assets/**/*
 #!/config/**/*

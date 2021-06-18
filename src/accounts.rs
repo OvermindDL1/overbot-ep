@@ -3,7 +3,10 @@ use crate::database::{DbPool, DbTransaction, Migration, Migrations};
 use crate::system::{QuitOnError, System};
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
-use std::{sync::Arc, time::{Duration, SystemTime}};
+use std::fmt::{Display, Formatter};
+use std::str::FromStr;
+use std::sync::Arc;
+use time::{Duration, OffsetDateTime};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tracing::*;
@@ -257,10 +260,10 @@ impl Accounts {
 		conn: &mut DbTransaction<'_>,
 		login: &str,
 		password: &str,
-		valid_duration: chrono::Duration,
+		valid_duration: Duration,
 	) -> Result<AccountSession, AccountsError> {
 		let account = Self::login_account(conn, login, password).await?;
-		let valid_until = chrono::Utc::now() + valid_duration;
+		let valid_until = OffsetDateTime::now_utc() + valid_duration;
 		let session = sqlx::query_scalar(
 			"INSERT INTO accounts_sessions (id, valid_until) VALUES ($1, $2) RETURNING token;",
 		)
@@ -271,14 +274,55 @@ impl Accounts {
 		.map_err(AccountsError::DatabaseError)?;
 		Ok(AccountSession {
 			id: account.id,
-			session,
+			token: session,
 		})
 	}
 }
 
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct AccountSession {
 	id: Uuid,
-	session: Uuid,
+	token: Uuid,
+}
+
+impl AccountSession {
+	pub fn id(&self) -> Uuid {
+		self.id
+	}
+
+	pub fn token(&self) -> Uuid {
+		self.token
+	}
+
+	pub async fn validate(&self, conn: &mut DbTransaction<'_>) -> anyhow::Result<()> {
+		sqlx::query(
+			"SELECT 1 FROM accounts_sessions WHERE id = &1 AND token = $2 AND valid_until <= now()",
+		)
+		.bind(self.id)
+		.bind(self.token)
+		.execute(conn)
+		.await?;
+		Ok(())
+	}
+}
+
+impl Display for AccountSession {
+	fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+		f.write_fmt(format_args!("{}|{}", self.id, self.token))
+	}
+}
+
+impl FromStr for AccountSession {
+	type Err = uuid::Error;
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		let (user_id_str, session_id_str) = s
+			.split_once('|')
+			.ok_or_else(|| Uuid::from_str(s).unwrap_err())?;
+		let id = Uuid::from_str(user_id_str)?;
+		let session = Uuid::from_str(session_id_str)?;
+		Ok(Self { id, token: session })
+	}
 }
 
 const MIGRATIONS: Migrations = Migrations::new(

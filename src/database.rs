@@ -10,6 +10,7 @@ use std::time::Duration;
 use tracing::*;
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "type")]
 pub enum ConnectionType {
 	External(String),
 	Embedded {

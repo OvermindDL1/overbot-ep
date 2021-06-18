@@ -9,8 +9,7 @@ publish = false
 [dependencies]
 anyhow = "1"
 argon2 = "0.2"
-chrono = "0.4"
-crossbeam = "0.8"
+crossbeam = "0.8.1"
 cursive = { version = "0.16.3", default-features = false, features = ["crossterm-backend"] }
 dashmap = "4"
 lazy_static = "1"
@@ -18,14 +17,17 @@ log4rs = "1"
 parking_lot = "0.11"
 pg-embed = "0.3"
 rand = "0.8"
-rocket = { version = "0.5.0-dev", git = "https://github.com/SergioBenitez/Rocket.git", features = ["secrets"] } # Change rocket to just `0.5` when it's released
+rocket = { version = "0.5.0-rc.1", features = ["secrets"] } # Change rocket to just `0.5` when it's released
+rocket_dyn_templates = {version = "0.1.0-rc.1", features = ["handlebars", "tera"] }
 ron = "0.6"
+rust-embed = "5.9"
 serde = { version = "1", features=["derive"] }
 serde-value = "0.7"
 sha2 = "0.9"
-sqlx = { version = "0.5", features = ["runtime-tokio-rustls", "postgres", "macros", "uuid", "tls", "chrono"] }
+sqlx = { version = "0.5", features = ["runtime-tokio-rustls", "postgres", "macros", "uuid", "tls", "time"] }
 structopt = "0.3"
 thiserror = "1"
+time = "0.2"
 tokio = { version = "1.6.1", features = ["full"] }
 tracing = { version = "0.1", features = ["attributes", "log", "log-always"] }
 typetag = "0.1"
